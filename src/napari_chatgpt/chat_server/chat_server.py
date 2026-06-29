@@ -138,7 +138,7 @@ class NapariChatServer:
         @self.app.get("/")
         async def get(request: Request):
             return templates.TemplateResponse(
-                "index.html", {"request": request, "port": self.port}
+                request, "index.html", {"port": self.port}
             )
 
         # Chat path:

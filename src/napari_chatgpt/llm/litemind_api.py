@@ -25,6 +25,67 @@ if TYPE_CHECKING:
 __litemind_api = None
 
 
+def _patch_gemini_mixed_tools() -> None:
+    """Patch GoogleApi so Gemini accepts mixed built-in + custom tools.
+
+    When Google Search (a Gemini built-in tool) is combined with custom
+    function-calling tools, Gemini requires
+    ``tool_config.include_server_side_tool_invocations = True``.  This
+    patch wraps ``generate_content_stream`` on each ``GoogleApi`` instance
+    to inject that flag automatically when the condition is detected.
+    """
+    try:
+        from litemind.apis.providers.google.google_api import GoogleApi
+
+        if getattr(GoogleApi, "_napari_chatgpt_mixed_tools_patched", False):
+            return
+
+        _original_init = GoogleApi.__init__
+
+        def _patched_init(self, *args, **kwargs):
+            _original_init(self, *args, **kwargs)
+            try:
+                from google.genai import types
+
+                client_models = self.client.models
+                _original_stream = client_models.generate_content_stream
+
+                def _patched_stream(*a, **kw):
+                    config = kw.get("config")
+                    if config is not None and getattr(config, "tools", None):
+                        has_google_search = any(
+                            getattr(t, "google_search", None) is not None
+                            for t in config.tools
+                        )
+                        has_func_decls = any(
+                            getattr(t, "function_declarations", None)
+                            for t in config.tools
+                        )
+                        if (
+                            has_google_search
+                            and has_func_decls
+                            and config.tool_config is None
+                        ):
+                            kw["config"] = config.model_copy(
+                                update={
+                                    "tool_config": types.ToolConfig(
+                                        include_server_side_tool_invocations=True
+                                    )
+                                }
+                            )
+                    return _original_stream(*a, **kw)
+
+                client_models.generate_content_stream = _patched_stream
+            except Exception:
+                pass
+
+        GoogleApi.__init__ = _patched_init
+        GoogleApi._napari_chatgpt_mixed_tools_patched = True
+
+    except Exception:
+        pass
+
+
 def is_llm_available() -> bool:
     """Check whether at least one LLM provider is available.
 
@@ -176,6 +237,9 @@ def get_litemind_api() -> "CombinedApi":
 
     # This module provides a global instance of the LiteMind API.
     global __litemind_api
+
+    # Apply compatibility patches before any provider is instantiated.
+    _patch_gemini_mixed_tools()
 
     # If the global instance is not initialized, create it.
     if __litemind_api is None:
